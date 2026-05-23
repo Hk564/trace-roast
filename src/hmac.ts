@@ -18,10 +18,13 @@ export function verifyTraceSignature(secret: string) {
     }
 
     // Hash: hmac_sha256(secret, timestamp + "." + rawBody)
-    const body = JSON.stringify(req.body);
+    // IMPORTANT: use the raw request bytes, NOT JSON.stringify(req.body).
+    // Re-serialising can change field order and break the signature check.
+    // rawBody is captured in index.ts via express.json({ verify: ... }).
+    const rawBody  = (req as any).rawBody?.toString() ?? JSON.stringify(req.body);
     const expected = 'sha256=' + crypto
       .createHmac('sha256', secret)
-      .update(`${timestamp}.${body}`)
+      .update(`${timestamp}.${rawBody}`)
       .digest('hex');
 
     try {
