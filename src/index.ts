@@ -36,8 +36,9 @@ const app = express();
 const PORT            = process.env.PORT            || 3000;
 const TRACE_HMAC_SECRET = process.env.TRACE_HMAC_SECRET || '';
 const TRACE_SKILL_ID  = process.env.TRACE_SKILL_ID  || '';
-const BRAIN_BASE_URL  = process.env.BRAIN_BASE_URL  || 'https://brain.endlessriver.ai';
-const TRACE_USER_ID   = process.env.TRACE_USER_ID   || '';
+const BRAIN_BASE_URL     = process.env.BRAIN_BASE_URL     || 'https://brain.endlessriver.ai';
+const TRACE_USER_ID      = process.env.TRACE_USER_ID      || '';
+const TRACE_PROJECT_TOKEN = process.env.TRACE_PROJECT_TOKEN || TRACE_HMAC_SECRET;
 
 // Capture rawBody BEFORE JSON parsing — required for HMAC verification.
 app.use(
@@ -53,6 +54,19 @@ type AlertStatus = 'alerted' | 'logged' | 'ignored';
 function ttsReply(tts: string | null, status: AlertStatus, extra?: object) {
   return { tts, status, ...extra };
 }
+
+// ─── 🔗 POST /pair ───────────────────────────────────────────────────────────
+// One-time endpoint to register your Trace user_id so proactive push works.
+// Call once from terminal: curl -X POST https://trace-roast.vercel.app/pair \
+//   -H "Content-Type: application/json" -d '{"user_id":"YOUR_ID_HERE"}'
+
+app.post('/pair', (req: Request, res: Response) => {
+  const { user_id } = req.body as { user_id?: string };
+  if (!user_id) return res.status(400).json({ error: 'user_id required' });
+  setUserId(user_id);
+  console.log(`[Pair] Registered user_id: ${user_id}`);
+  return res.json({ ok: true, user_id });
+});
 
 // ─── 🩺 GET /health ───────────────────────────────────────────────────────────
 
@@ -464,7 +478,7 @@ async function sendPushResponse(user_id: string, responses: any[]) {
     method: 'POST',
     headers: {
       'Content-Type':  'application/json',
-      'Authorization': `Bearer ${TRACE_HMAC_SECRET}`,
+      'Authorization': `Bearer ${TRACE_PROJECT_TOKEN}`,
     },
     body,
   });
