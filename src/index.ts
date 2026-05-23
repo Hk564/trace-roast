@@ -37,6 +37,7 @@ const PORT            = process.env.PORT            || 3000;
 const TRACE_HMAC_SECRET = process.env.TRACE_HMAC_SECRET || '';
 const TRACE_SKILL_ID  = process.env.TRACE_SKILL_ID  || '';
 const BRAIN_BASE_URL  = process.env.BRAIN_BASE_URL  || 'https://brain.endlessriver.ai';
+const TRACE_USER_ID   = process.env.TRACE_USER_ID   || '';
 
 // Capture rawBody BEFORE JSON parsing — required for HMAC verification.
 app.use(
@@ -457,18 +458,18 @@ async function postCallback(callbackUrl: string, requestId: string, responses: a
 
 async function sendPushResponse(user_id: string, responses: any[]) {
   const url = `${BRAIN_BASE_URL}/api/skill-push/${TRACE_SKILL_ID}`;
+  console.log(`[Push] POST ${url}`);
+  const body = JSON.stringify({ user_id, responses });
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${TRACE_HMAC_SECRET}`,
     },
-    body: JSON.stringify({ user_id, responses }),
+    body,
   });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`[Push] ${res.status} ${text}`);
-  }
+  const text = await res.text();
+  console.log(`[Push] response ${res.status}: ${text}`);
 }
 
 /**
@@ -477,8 +478,16 @@ async function sendPushResponse(user_id: string, responses: any[]) {
  * Shortcut caller doesn't forward the tts field itself.
  */
 function firePushNotification(tts: string): void {
-  const userId = getUserId();
-  if (!userId || !TRACE_SKILL_ID) return; // not yet registered with the platform
+  const userId = getUserId() || TRACE_USER_ID || null;
+  console.log(`[Push] attempting — userId=${userId}, skillId=${TRACE_SKILL_ID}, tts="${tts}"`);
+  if (!userId) {
+    console.warn('[Push] skipped — no user_id. Set TRACE_USER_ID env var or trigger a Trace webhook first.');
+    return;
+  }
+  if (!TRACE_SKILL_ID) {
+    console.warn('[Push] skipped — TRACE_SKILL_ID env var not set.');
+    return;
+  }
   sendPushResponse(userId, [roastNotification(tts)]).catch((err) =>
     console.error('[Push] failed:', err)
   );
