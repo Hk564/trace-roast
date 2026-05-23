@@ -114,19 +114,25 @@ app.post('/more-time', (req: Request, res: Response) => {
 // The iOS Shortcut reads `tts` and triggers the Trace glasses speaker.
 
 app.post('/track', (req: Request, res: Response) => {
-  const { app: appName, event, timestamp } = req.body as {
-    app?: string; event?: string; timestamp?: string | null;
-  };
+  // Debug: log raw body and content-type so we can see what the Shortcut sends
+  console.log('[Track] content-type:', req.headers['content-type']);
+  console.log('[Track] raw body:', (req as any).rawBody?.toString());
+  console.log('[Track] parsed body:', JSON.stringify(req.body));
+
+  // Normalise to lowercase so "Instagram", "OPENED" etc. all work
+  const appName  = (req.body?.app   as string | undefined)?.toLowerCase().trim();
+  const event    = (req.body?.event as string | undefined)?.toLowerCase().trim();
+  const timestamp = req.body?.timestamp as string | null | undefined;
 
   // ── Validate ────────────────────────────────────────────────────────────
   if (!appName || !event) {
-    return res.status(400).json({ error: 'Required: app, event' });
+    return res.status(400).json({ error: 'Required: app, event', received: req.body });
   }
   if (!['instagram', 'youtube'].includes(appName)) {
-    return res.status(400).json({ error: 'app must be "instagram" or "youtube"' });
+    return res.status(400).json({ error: 'app must be "instagram" or "youtube"', received_app: appName });
   }
   if (!['opened', 'closed', 'timeout'].includes(event)) {
-    return res.status(400).json({ error: 'event must be "opened", "closed", or "timeout"' });
+    return res.status(400).json({ error: 'event must be "opened", "closed", or "timeout"', received_event: event });
   }
 
   const trackedApp = appName as App;
