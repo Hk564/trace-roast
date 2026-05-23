@@ -17,6 +17,7 @@ interface SessionState {
   openTime:         Date | null;
   openCount:        number;   // number of times opened today
   extraTimeGranted: boolean;  // user already claimed their 5-min bonus today
+  alertFiredAt:     number | null; // epoch ms — prevents Signal 1 + Signal 2 double-firing
 }
 
 interface DailyUsage {
@@ -66,8 +67,8 @@ let state: AppState = {
   mode:    'normal',
   usage:   { date: '', instagram: 0, youtube: 0, alerts: 0 },
   sessions: {
-    instagram: { openTime: null, openCount: 0, extraTimeGranted: false },
-    youtube:   { openTime: null, openCount: 0, extraTimeGranted: false },
+    instagram: { openTime: null, openCount: 0, extraTimeGranted: false, alertFiredAt: null },
+    youtube:   { openTime: null, openCount: 0, extraTimeGranted: false, alertFiredAt: null },
   },
   audio:   { pattern: null, updatedAt: null },
   userId:  null,
@@ -86,8 +87,8 @@ function ensureDailyReset(): void {
   console.log(`[Tracker] New day (${today}) — resetting counters`);
   state.usage = { date: today, instagram: 0, youtube: 0, alerts: 0 };
   state.sessions = {
-    instagram: { openTime: null, openCount: 0, extraTimeGranted: false },
-    youtube:   { openTime: null, openCount: 0, extraTimeGranted: false },
+    instagram: { openTime: null, openCount: 0, extraTimeGranted: false, alertFiredAt: null },
+    youtube:   { openTime: null, openCount: 0, extraTimeGranted: false, alertFiredAt: null },
   };
   state.audio = { pattern: null, updatedAt: null };
 }
@@ -103,11 +104,13 @@ function round1(n: number): number {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /** Called when iOS Shortcut reports an app was opened. */
-export function handleOpen(app: App, timestamp: string): { openCount: number } {
+export function handleOpen(app: App, timestamp?: string): { openCount: number } {
   ensureDailyReset();
-  const session      = state.sessions[app];
-  session.openTime   = new Date(timestamp);
-  session.openCount += 1;
+  const session         = state.sessions[app];
+  const t               = timestamp ? new Date(timestamp) : new Date();
+  session.openTime      = isNaN(t.getTime()) ? new Date() : t;
+  session.openCount    += 1;
+  session.alertFiredAt  = null; // reset debounce — new session, fresh slate
   console.log(`[Tracker] ${app} opened — #${session.openCount} today`);
   return { openCount: session.openCount };
 }
@@ -129,7 +132,7 @@ export type HandleCloseReturn =
   | { logged: false; reason: string };
 
 /** Called when iOS Shortcut reports an app was closed. */
-export function handleClose(app: App, timestamp: string): HandleCloseReturn {
+export function handleClose(app: App, timestamp?: string): HandleCloseReturn {
   ensureDailyReset();
   const session = state.sessions[app];
 
@@ -137,7 +140,9 @@ export function handleClose(app: App, timestamp: string): HandleCloseReturn {
     return { logged: false, reason: 'No open time on record — event skipped' };
   }
 
-  const durationMs   = new Date(timestamp).getTime() - session.openTime.getTime();
+  const t          = timestamp ? new Date(timestamp) : new Date();
+  const closeTime  = isNaN(t.getTime()) ? new Date() : t;
+  const durationMs = closeTime.getTime() - session.openTime.getTime();
   const durationMins = Math.max(0, Math.min(durationMs / 60_000, 120)); // clamp 0–120
   session.openTime   = null; // clear session regardless
 
@@ -215,6 +220,24 @@ export function getAudioPattern(windowMs = 90_000): AudioPattern | null {
   return (Date.now() - state.audio.updatedAt) < windowMs
     ? state.audio.pattern
     : null;
+}
+
+/**
+ * Returns true if an alert already fired for this app within the debounce window.
+ * Prevents Signal 1 (/track) and Signal 2 (/webhook audio) from both firing
+ * for the same scrolling session.
+ */
+export function hasRecentAlert(app: App, windowMs = 10 * 60_000): boolean {
+  ensureDailyReset();
+  const { alertFiredAt } = state.sessions[app];
+  return !!alertFiredAt && (Date.now() - alertFiredAt) < windowMs;
+}
+
+/** Mark that an alert fired for this app. Call instead of incrementAlerts(). */
+export function markAlertFired(app: App): void {
+  ensureDailyReset();
+  state.sessions[app].alertFiredAt = Date.now();
+  state.usage.alerts += 1;
 }
 
 export function incrementAlerts(): void {

@@ -26,7 +26,7 @@ import {
   handleOpen, handleClose, grantExtraTime,
   setMode, setUserId, getUserId,
   updateAudioPattern, getAudioPattern,
-  incrementAlerts, getStatus,
+  incrementAlerts, hasRecentAlert, markAlertFired, getStatus,
   App, Mode,
 } from './tracker';
 
@@ -115,18 +115,18 @@ app.post('/more-time', (req: Request, res: Response) => {
 
 app.post('/track', (req: Request, res: Response) => {
   const { app: appName, event, timestamp } = req.body as {
-    app?: string; event?: string; timestamp?: string;
+    app?: string; event?: string; timestamp?: string | null;
   };
 
   // ── Validate ────────────────────────────────────────────────────────────
-  if (!appName || !event || !timestamp) {
-    return res.status(400).json({ error: 'Required: app, event, timestamp' });
+  if (!appName || !event) {
+    return res.status(400).json({ error: 'Required: app, event' });
   }
   if (!['instagram', 'youtube'].includes(appName)) {
     return res.status(400).json({ error: 'app must be "instagram" or "youtube"' });
   }
-  if (!['opened', 'closed'].includes(event)) {
-    return res.status(400).json({ error: 'event must be "opened" or "closed"' });
+  if (!['opened', 'closed', 'timeout'].includes(event)) {
+    return res.status(400).json({ error: 'event must be "opened", "closed", or "timeout"' });
   }
 
   const trackedApp = appName as App;
@@ -136,13 +136,38 @@ app.post('/track', (req: Request, res: Response) => {
     const { openCount } = handleOpen(trackedApp, timestamp);
 
     // Third or more open of the same app today — call it out immediately.
-    if (openCount >= 3) {
-      incrementAlerts();
+    if (openCount >= 3 && !hasRecentAlert(trackedApp)) {
+      markAlertFired(trackedApp);
       firePushNotification(getRoast('THIRD_OPEN'));
       return res.json(ttsReply(getRoast('THIRD_OPEN'), 'alerted', { open_count: openCount }));
     }
 
     return res.json(ttsReply(null, 'logged', { open_count: openCount }));
+  }
+
+  // ── Timeout — Shortcut's 15-min timer fired ─────────────────────────────
+  // The Shortcut IS the clock. When it says 15 mins are up, we trust it and
+  // fire the roast directly — no server-side time tracking needed.
+  if (event === 'timeout') {
+    if (hasRecentAlert(trackedApp)) {
+      return res.json(ttsReply(null, 'logged', { note: 'alert already fired this session' }));
+    }
+
+    const audio = getAudioPattern();
+
+    // Legitimate use — suppress
+    if (audio === 'continuous' || audio === 'conversation') {
+      return res.json(ttsReply(null, 'logged', { note: `audio=${audio}, suppressed` }));
+    }
+
+    markAlertFired(trackedApp);
+
+    const tts = audio === 'doom_scrolling'
+      ? getRoast('AUDIO_CONFIRMS')
+      : getRoast('FIRST_ALERT');
+
+    firePushNotification(tts);
+    return res.json(ttsReply(tts, 'alerted'));
   }
 
   // ── App closed ──────────────────────────────────────────────────────────
@@ -162,12 +187,18 @@ app.post('/track', (req: Request, res: Response) => {
 
   // ── Alert decision ──────────────────────────────────────────────────────
   //
+  // Debounce: if Signal 2 (/webhook audio) already fired for this app within
+  // the last 10 minutes, Signal 1 (/track) stays silent. No double-roasting.
+  //
   // Priority 1: combined limit (instagram + youtube together)
   if (combinedMins >= limits.combined) {
-    incrementAlerts();
+    if (hasRecentAlert(trackedApp)) {
+      return res.json(ttsReply(null, 'logged', { note: 'alert already fired this session' }));
+    }
+    markAlertFired(trackedApp);
     const tts = audio === 'doom_scrolling'
       ? getRoast('AUDIO_CONFIRMS')   // two signals
-      : getRoast('COMBINED_LIMIT');  // single signal — combined limit is always alerted
+      : getRoast('COMBINED_LIMIT');  // single signal — combined limit always alerts
     firePushNotification(tts);
     return res.json(ttsReply(tts, 'alerted', { combined_mins: combinedMins }));
   }
@@ -175,29 +206,29 @@ app.post('/track', (req: Request, res: Response) => {
   // Priority 2: per-app daily limit
   if (dailyMins >= limits[trackedApp]) {
 
-    // Legitimate audio (music, tutorial, meeting) → suppress.
-    // Single signal only — we won't nag someone watching a lecture.
+    // Legitimate audio (music, tutorial, meeting) → suppress entirely.
     if (audio === 'continuous' || audio === 'conversation') {
       console.log(`[Track] ${trackedApp} limit hit but audio = ${audio} — suppressing alert`);
       return res.json(ttsReply(null, 'logged', { note: `audio=${audio}, suppressed` }));
     }
 
-    incrementAlerts();
+    // Signal 2 already fired — don't stack Signal 1 on top.
+    if (hasRecentAlert(trackedApp)) {
+      return res.json(ttsReply(null, 'logged', { note: 'alert already fired this session' }));
+    }
+
+    markAlertFired(trackedApp);
 
     let tts: string;
 
     if (audio === 'doom_scrolling') {
-      // Two signals: limit exceeded + audio confirms scrolling.
-      tts = getRoast('AUDIO_CONFIRMS');
+      tts = getRoast('AUDIO_CONFIRMS');   // two signals
     } else if (extraTimeGranted) {
-      // User already asked for more time and used it all.
-      tts = getRoast('EXCEEDS_AGAIN');
+      tts = getRoast('EXCEEDS_AGAIN');    // used bonus time, hit again
     } else if (audio === 'silent') {
-      // Audio was analysed and found silent — silent-scrolling caught.
-      tts = getRoast('SILENT_SCROLLING');
+      tts = getRoast('SILENT_SCROLLING'); // caught silent scrolling
     } else {
-      // No audio data available — generic first alert.
-      tts = getRoast('FIRST_ALERT');
+      tts = getRoast('FIRST_ALERT');      // first hit, no audio data
     }
 
     firePushNotification(tts);
@@ -251,14 +282,20 @@ async function processEvent(opts: {
     );
 
     // Two-signal check: audio confirms doom scrolling AND app is over the limit.
+    // Only fires if Signal 1 (/track) hasn't already alerted — no overlap.
     if (analysis.pattern === 'doom_scrolling') {
       const status = getStatus();
       const overInstagram = status.instagram_mins >= status.limits.instagram;
       const overYoutube   = status.youtube_mins   >= status.limits.youtube;
       const overCombined  = status.combined_mins  >= status.limits.combined;
 
-      if (overInstagram || overYoutube || overCombined) {
-        incrementAlerts();
+      // Fire for whichever over-limit app hasn't been alerted yet this session.
+      const targetApp = (overInstagram && !hasRecentAlert('instagram')) ? 'instagram'
+                      : (overYoutube   && !hasRecentAlert('youtube'))   ? 'youtube'
+                      : null;
+
+      if (targetApp && (overInstagram || overYoutube || overCombined)) {
+        markAlertFired(targetApp);
         const tts = getRoast('AUDIO_CONFIRMS');
         await postCallback(callbackUrl, requestId, [roastNotification(tts)]);
         return;
