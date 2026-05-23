@@ -353,6 +353,14 @@ app.post('/mcp', async (req: Request, res: Response) => {
   const { jsonrpc, method, params, id } = req.body;
   if (jsonrpc !== '2.0') return res.status(400).send('Invalid JSON-RPC');
 
+  // Capture user_id from MCP requests (glasses voice commands)
+  const mcpUserId = req.body?.user?.id ?? req.body?.params?.user_id ?? null;
+  if (mcpUserId) {
+    setUserId(mcpUserId);
+    console.log(`[MCP] Captured user_id: ${mcpUserId}`);
+  }
+  console.log('[MCP] request body:', JSON.stringify(req.body).slice(0, 300));
+
   if (method === 'tools/list') {
     return res.json({
       jsonrpc: '2.0',
